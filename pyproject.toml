@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "telegram-retriever"
-version = "0.1.0"
+version = "0.1.1"
 description = "A Human-in-the-Loop retriever for LangChain that pauses execution to wait for a Telegram reply."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -30,9 +30,9 @@ dependencies = [
 ]
 
 [project.urls]
-Documentation = "https://github.com/username/telegram-retriever#readme"
-Issues = "https://github.com/username/telegram-retriever/issues"
-Source = "https://github.com/username/telegram-retriever"
+Documentation = "https://github.com/l3onlau/telegram-retriever#readme"
+Issues = "https://github.com/l3onlau/telegram-retriever/issues"
+Source = "https://github.com/l3onlau/telegram-retriever"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/telegram_retriever"]
