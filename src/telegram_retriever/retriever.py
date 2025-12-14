@@ -1,12 +1,16 @@
+import asyncio
+import logging
 import time
 from typing import List, Optional
 
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
-from pydantic import Field, PrivateAttr, SecretStr
+from pydantic import Field, PrivateAttr, SecretStr, model_validator
 
 from .client import TelegramClient
+
+logger = logging.getLogger(__name__)
 
 
 class TelegramRetriever(BaseRetriever):
@@ -14,7 +18,7 @@ class TelegramRetriever(BaseRetriever):
     A Human-in-the-Loop retriever that pauses execution to ask a user a question
     via Telegram.
 
-    It blocks until a valid text reply is received.
+    It blocks (or awaits) until a valid text reply is received or a timeout occurs.
     """
 
     bot_token: SecretStr = Field(..., description="Telegram Bot API Token")
@@ -24,97 +28,136 @@ class TelegramRetriever(BaseRetriever):
     )
     polling_interval: float = Field(default=2.0, description="Sleep time between polls")
 
-    # Private attributes (not part of the Pydantic schema for serialization)
     _client: TelegramClient = PrivateAttr()
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        # Initialize the HTTP client with the plain text token
-        self._client = TelegramClient(bot_token=self.bot_token.get_secret_value())
+    @model_validator(mode="after")
+    def initialize_client(self) -> "TelegramRetriever":
+        """
+        Initializes the TelegramClient after Pydantic has validated
+        that bot_token is present and correct.
+        """
+        token = self.bot_token.get_secret_value()
+        self._client = TelegramClient(bot_token=token)
+        return self
 
     def _get_relevant_documents(
-        self, query: str, *, run_manager: CallbackManagerForRetrieverRun = None
+        self,
+        query: str,
+        *,
+        run_manager: Optional[CallbackManagerForRetrieverRun] = None,
     ) -> List[Document]:
         """
-        Synchronous blocking call that sends a question and waits for a reply.
+        Synchronous blocking call that sends a question and polls for a reply.
         """
+        try:
+            formatted_query = f"🤖 AI Question: {query}"
+            send_response = self._client.send_message(self.chat_id, formatted_query)
 
-        # 1. SEND: Format and send the question
-        formatted_query = f"🤖 AI Question: {query}"
-        send_response = self._client.send_message(self.chat_id, formatted_query)
+            # Ensure we actually got a message ID back
+            if not send_response or "result" not in send_response:
+                logger.error("Failed to send Telegram message.")
+                return []
 
-        # 2. RECORD: Capture the Message ID of the question we just sent
-        question_message_id = send_response["result"]["message_id"]
+            question_message_id = send_response["result"]["message_id"]
 
-        # 3. BLOCK & POLL: Wait for the specific reply
-        start_time = time.time()
-        last_update_id: Optional[int] = None
+            # Use monotonic time for robust duration calculation
+            start_time = time.monotonic()
+            last_update_id: Optional[int] = None
 
-        while True:
-            # Check for timeout
-            if (time.time() - start_time) > self.polling_timeout:
-                raise TimeoutError(
-                    f"Waited {self.polling_timeout}s for a reply on Telegram "
-                    "but received none."
-                )
+            logger.info(
+                f"Question sent (ID: {question_message_id}). Waiting for reply..."
+            )
 
-            # Poll for updates
-            try:
-                updates_response = self._client.get_updates(offset=last_update_id)
-                updates = updates_response.get("result", [])
-            except Exception as e:
-                # Log error or print warning, then retry loop
-                print(f"Polling error: {e}")
-                time.sleep(self.polling_interval)
-                continue
+            while True:
+                # 1. Check Timeout
+                if (time.monotonic() - start_time) > self.polling_timeout:
+                    error_msg = f"Waited {self.polling_timeout}s but received no reply."
+                    logger.error(error_msg)
+                    raise TimeoutError(error_msg)
 
-            for update in updates:
-                # Update offset to acknowledge processing
-                last_update_id = update["update_id"] + 1
-
-                message = update.get("message")
-                if not message:
+                # 2. Poll Updates
+                try:
+                    updates_response = self._client.get_updates(offset=last_update_id)
+                    updates = updates_response.get("result", [])
+                except Exception as e:
+                    logger.warning(f"Telegram polling error: {e}")
+                    time.sleep(self.polling_interval)
                     continue
 
-                # 4. STRICT VALIDATION
+                # 3. Process Updates
+                for update in updates:
+                    # Advance the offset to avoid reprocessing
+                    last_update_id = update["update_id"] + 1
 
-                # A. Target Match: Must be from the configured chat_id
-                # Note: telegram API returns chat IDs as integers usually
-                if str(message["chat"]["id"]) != str(self.chat_id):
-                    continue
-
-                # B. Reply Match: Must be a reply to OUR question
-                reply_to = message.get("reply_to_message")
-                if not reply_to or reply_to["message_id"] != question_message_id:
-                    continue
-
-                # C. Content Match: Must contain text (no stickers, photos)
-                text_content = message.get("text")
-                if not text_content:
-                    # Logic: We see the reply, but it's invalid content.
-                    # We ignore it and keep waiting for text.
-                    print("Received non-text reply. Ignoring...")
-                    continue
-
-                # 5. RETURN: If we get here, we have a valid answer.
-                return [
-                    Document(
-                        page_content=text_content,
-                        metadata={
-                            "source": "telegram",
-                            "user_id": message.get("from", {}).get("id"),
-                            "username": message.get("from", {}).get("username"),
-                            "reply_to_msg_id": question_message_id,
-                        },
+                    result_doc = self._parse_valid_reply(
+                        update.get("message"), question_message_id
                     )
-                ]
 
-            # Sleep briefly to prevent tight looping if network is fast/mocked
-            time.sleep(self.polling_interval)
+                    if result_doc:
+                        logger.info("Valid reply received via Telegram.")
+                        return [result_doc]
 
-    # Async implementation is required by BaseRetriever, but we wrap the sync logic
-    # because the nature of this tool is blocking/sequential.
+                # 4. Wait before next poll
+                time.sleep(self.polling_interval)
+
+        except Exception as e:
+            logger.exception("Unexpected error in TelegramRetriever")
+            raise e
+
     async def _aget_relevant_documents(
-        self, query: str, *, run_manager: CallbackManagerForRetrieverRun = None
+        self,
+        query: str,
+        *,
+        run_manager: Optional[CallbackManagerForRetrieverRun] = None,
     ) -> List[Document]:
-        return self._get_relevant_documents(query, run_manager=run_manager)
+        """
+        Asynchronous wrapper.
+
+        Since the underlying TelegramClient and polling logic is blocking/synchronous,
+        we run the synchronous method in a separate thread to avoid blocking the
+        async event loop.
+        """
+        return await asyncio.get_running_loop().run_in_executor(
+            None,
+            self._get_relevant_documents,
+            query,
+            # We pass run_manager kwarg explicitly, though run_in_executor
+            # argument unpacking can be tricky, passing as positional or via lambda is
+            # safer
+            # if the signature gets complex. Here, simpler is better:
+        )
+
+    def _parse_valid_reply(
+        self, message: Optional[dict], question_msg_id: int
+    ) -> Optional[Document]:
+        """
+        Validates a message dictionary and returns a Document if it matches
+        the criteria (reply to the specific question, from the correct chat).
+        """
+        if not message:
+            return None
+
+        # Validate Chat ID
+        if str(message.get("chat", {}).get("id")) != str(self.chat_id):
+            return None
+
+        # Validate it is a Reply to our specific bot message
+        reply_to = message.get("reply_to_message")
+        if not reply_to or reply_to.get("message_id") != question_msg_id:
+            return None
+
+        # Validate Content
+        text_content = message.get("text")
+        if not text_content:
+            logger.debug("Received non-text reply (photo/sticker). Ignoring.")
+            return None
+
+        return Document(
+            page_content=text_content,
+            metadata={
+                "source": "telegram",
+                "user_id": message.get("from", {}).get("id"),
+                "username": message.get("from", {}).get("username"),
+                "reply_to_msg_id": question_msg_id,
+            },
+        )
