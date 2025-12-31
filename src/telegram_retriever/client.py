@@ -1,52 +1,41 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 
 
-class TelegramClient:
-    """
-    A lightweight synchronous wrapper around the Telegram Bot API.
-    """
+def telegram_url(
+    bot_token: str, method: str, base_url: str = "https://api.telegram.org"
+) -> str:
+    """Builds a URL for the Telegram Bot API."""
+    return f"{base_url}/bot{bot_token}/{method}"
 
-    def __init__(self, bot_token: str, base_url: str = "https://api.telegram.org"):
-        self.bot_token = bot_token
-        self.api_url = f"{base_url}/bot{bot_token}"
-        self.client = httpx.Client(
-            timeout=None
-        )  # Disable default timeout for long polling
 
-    def send_message(self, chat_id: str, text: str) -> Dict[str, Any]:
-        """
-        Sends a text message to the specified chat_id.
-        Returns the raw JSON response from Telegram.
-        """
-        url = f"{self.api_url}/sendMessage"
-        payload = {"chat_id": chat_id, "text": text}
+def send_message(
+    client: httpx.Client, bot_token: str, chat_id: str, text: str
+) -> Dict[str, Any]:
+    """Dispatches a text message to a specific chat."""
+    response = client.post(
+        telegram_url(bot_token, "sendMessage"), json={"chat_id": chat_id, "text": text}
+    )
+    response.raise_for_status()
+    return response.json()
 
-        response = self.client.post(url, json=payload)
-        response.raise_for_status()
-        return response.json()
 
-    def get_updates(
-        self, offset: Optional[int] = None, timeout: int = 10
-    ) -> Dict[str, Any]:
-        """
-        Fetches new updates using Long Polling.
+def fetch_updates(
+    client: httpx.Client,
+    bot_token: str,
+    offset: Optional[int] = None,
+    timeout: int = 10,
+) -> List[Dict[str, Any]]:
+    """Retrieves a list of updates from the Telegram server."""
+    params = {
+        "timeout": timeout,
+        "allowed_updates": ["message"],
+        **({"offset": offset} if offset is not None else {}),
+    }
 
-        :param offset: Identifier of the first update to be returned.
-        :param timeout: Timeout in seconds for long polling
-        (wait time at Telegram server).
-        """
-        url = f"{self.api_url}/getUpdates"
-        params = {
-            "timeout": timeout,
-            "allowed_updates": ["message"],  # We only care about messages
-        }
-        if offset is not None:
-            params["offset"] = offset
-
-        # We set the read timeout slightly higher than the poll timeout
-        # to ensure we don't cut the connection prematurely.
-        response = self.client.get(url, params=params, timeout=timeout + 5)
-        response.raise_for_status()
-        return response.json()
+    response = client.get(
+        telegram_url(bot_token, "getUpdates"), params=params, timeout=timeout + 5
+    )
+    response.raise_for_status()
+    return response.json().get("result", [])

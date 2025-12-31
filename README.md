@@ -1,102 +1,84 @@
 # telegram-retriever
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+**telegram-retriever** is a functional, human-in-the-loop extension for LangChain. It allows an LLM agent to pause execution, send a query to a specific Telegram user, and synchronously wait for a text-based reply.
 
-**telegram-retriever** is a lightweight Python library designed to integrate "Human-in-the-Loop" capabilities into LangChain workflows. 
+## 🧠 The Functional Pipeline
 
-Unlike standard retrievers that search databases, this tool allows an LLM agent to **pause execution**, send a query to a specific Telegram user, and **synchronously wait** for a text-based reply. The user's reply is returned to the agent as the retrieved context.
+The retriever follows a strict data-flow architecture:
 
-## Key Features
+* **Dispatch**: Sends the AI's question to the target chat via the Telegram Bot API.
+* **Poll**: Enters a stateless polling loop to fetch updates.
+* **Filter**: Validates incoming data to ensure it is a text-based "Reply-To" message from the correct user.
+* **Transform**: Converts the validated Telegram message into a LangChain `Document`.
 
-- **Interactive Retrieval:** The `invoke()` method blocks execution until a human replies.
-- **Strict Threading:** Validates that the incoming message is an explicit "Reply To" the bot's question.
-- **Zero Infrastructure:** Uses Long Polling. No webhooks, public IPs, or databases required.
-- **Async Support:** Fully supports `ainvoke()` for non-blocking execution in web apps (FastAPI/LangServe).
-- **Text-Only:** Filters out stickers, photos, and voice notes to ensure clean LLM input.
-
-## Installation
+## 🚀 Installation
 
 ```bash
 pip install telegram-retriever
 
 ```
 
-## Quick Start
-### 1. Synchronous Usage (Scripts & CLI)This is the simplest way to test. The script will pause and wait for your reply on Telegram.
+## 🛠 Usage
 
-> **Note:** For security, avoid hardcoding tokens. Use `os.getenv` or `getpass`.
+### Synchronous (Blocking)
+
+Perfect for scripts where the process should wait for human intervention.
 
 ```python
 import os
 from telegram_retriever import TelegramRetriever
 
-# Initialize the retriever
-# Pro-tip: Store your token in an environment variable named 'TELEGRAM_BOT_TOKEN'
 retriever = TelegramRetriever(
-    bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "YOUR-BOT-TOKEN-HERE"),
-    chat_id="..."  # The target User ID
+    bot_token=os.getenv("TELEGRAM_BOT_TOKEN"),
+    chat_id=os.getenv("TELEGRAM_CHAT_ID")
 )
 
-print("🤖 Sending question to Telegram...")
-
-# This BLOCKS until you reply to the bot on your phone
-result = retriever.invoke("Is the production server ready for deployment?")
-
-# result is a List[Document]
-print(f"📩 Received: {result[0].page_content}")
-# Output: "Yes, proceed immediately."
+# Execution pauses here until the human replies on Telegram
+docs = retriever.invoke("Do you approve the budget for Q3?")
+print(f"Human response: {docs[0].page_content}")
 
 ```
 
-### 2. Asynchronous Usage (FastAPI / Web Apps)Use `ainvoke` to run the retriever without freezing your entire application server. This runs the polling loop in a background thread.
+### Asynchronous (Non-blocking)
+
+Recommended for FastAPI or LangServe applications to keep the event loop free.
 
 ```python
-import asyncio
-from telegram_retriever import TelegramRetriever
-
-async def main():
-    retriever = TelegramRetriever(
-        bot_token="...",
-        chat_id="..."
-    )
-    
-    print("🤖 AI is asking...")
-    
-    # Does not block the main event loop
-    docs = await retriever.ainvoke("Do you approve this budget?")
-    
-    print(f"User Replied: {docs[0].page_content}")
-
-if __name__ == "__main__":
-    asyncio.run(main())
+docs = await retriever.ainvoke("Should I trigger the deployment?")
 
 ```
 
-## How It Works
-1. **Send:** The retriever sends your query as a message: `🤖 AI Question: {query}`.
-2. **Wait:** It enters a polling loop, checking for updates every 2 seconds.
-3. **Validate:** It ignores unrelated messages. It only accepts a message if:
-    * It comes from the correct `chat_id`.
-    * It is a **Reply** to the specific question asked.
-    * It contains **Text** (not stickers or photos).
-4. **Return:** The text content is wrapped in a LangChain `Document` and returned.
+## ⚙️ Configuration
 
-## Configuration Reference
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `bot_token` | `str` | **Required** | Your Telegram Bot API Token (from @BotFather). |
-| `chat_id` | `str` | **Required** | The target User ID or Group ID to ask. |
-| `polling_timeout` | `float` | `600.0` | Max time (in seconds) to wait for a reply before raising `TimeoutError`. |
-| `polling_interval` | `float` | `2.0` | Time (in seconds) to sleep between polling checks. |
+| `bot_token` | `SecretStr` | **Required** | Your Telegram Bot API Token. |
+| `chat_id` | `str` | **Required** | The target User ID or Group ID. |
+| `polling_timeout` | `float` | `600.0` | Seconds to wait before timing out. |
+| `polling_interval` | `float` | `2.0` | Seconds between update checks. |
 
-## DevelopmentTo run the test suite (requires `pytest` and `pytest-asyncio`):
+## 🧪 Development
+
+The project is built on pure functions, making testing simple and reliable.
 
 ```bash
 # Install test dependencies
 pip install .[test]
 
-# Run tests
+# Run the functional test suite
 pytest
 
 ```
+
+## 🎮 Demo: Human-in-the-Loop Workflow
+
+This demo uses the script located at [`examples/chatbot.py`](./examples/chatbot.py) to showcase how the AI agent (via DSPy) intelligently decides when human intervention is necessary.
+
+### How it Works:
+1. **Direct AI Response (Autonomous):** When the user asks a straightforward math question (*"What's 127 x 23?"*), the AI handles it locally using its internal knowledge. It does **not** trigger a Telegram notification because the task is simple and clear.
+2. **Human-in-the-Loop (Triggered):** When the user asks a subjective or context-heavy question (*"What's so special about 67?"*), the AI recognizes its own limitations.
+3. **Telegram Integration:** The AI pauses, sends the query to the human expert via Telegram, and waits for a reply. 
+4. **Synthesis:** Once the human replies (*"It's an internet meme"*), the AI synthesizes this "expert context" into a comprehensive final answer for the user.
+
+![Human-in-the-Loop Demo Screenshot](./examples/chatbot-demo.jpg)
+*(Note: Sensitive Telegram identifiers have been safely redacted in this image.)*
